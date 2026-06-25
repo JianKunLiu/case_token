@@ -5,7 +5,7 @@
 
 接口:
   POST /get_document  入参 {"app_id": "...", "app_secret": "...", "document_id": "..."}
-                      返回 {"text": "...", "images": ["http://...", ...]}
+                      返回 {"text": "..."}
   GET  /health        健康检查
   GET  /static/xxx    图片文件
 """
@@ -40,9 +40,9 @@ def health():
 @app.route("/get_document", methods=["POST"])
 def get_document():
     """
-    获取飞书文档的文字和图片
+    获取飞书文档的文字（含图片 Markdown 引用）
     入参 JSON: {"app_id": "...", "app_secret": "...", "document_id": "..."}
-    返回 JSON: {"text": "...", "images": ["http://...", ...]}
+    返回 JSON: {"text": "..."}
     """
     try:
         body = request.get_json(force=True)
@@ -79,7 +79,7 @@ def serve_static(filename):
 # ==================== 启动 ====================
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 5001))
     host = os.environ.get("HOST", "0.0.0.0")
     debug = os.environ.get("DEBUG", "true").lower() == "true"
 
