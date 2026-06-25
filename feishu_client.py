@@ -396,7 +396,8 @@ def fetch_document(app_id: str, app_secret: str, document_id: str,
             })
 
     # 3. 用 blocks 生成 Markdown（会跳过删除线内容和失效 block）
-    text = _blocks_to_markdown(blocks, image_url_map=image_url_map)
+    # document_id 即为根 PAGE block 的 ID，子块的 parent_id 指向它
+    text = _blocks_to_markdown(blocks, parent_id=document_id, image_url_map=image_url_map)
 
     # 3.1 清理多余空行
     import re
