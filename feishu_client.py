@@ -373,27 +373,13 @@ def fetch_document(app_id: str, app_secret: str, document_id: str,
     """
     client = FeishuClient(app_id, app_secret)
 
-    # 1. 获取纯文本
-    text = client.get_raw_content(document_id)
-
-    # 1.1 清理 raw_content 中可能存在的失效引用占位文本，并清理多余空行
-    import re
-    invalid_patterns = [
-        r'\[引用内容[^\]]*失效[^\]]*\]',
-        r'\[引用内容[^\]]*不可用[^\]]*\]',
-        r'\[引用[^\]]*已失效[^\]]*\]',
-        r'\[内容[^\]]*不可用[^\]]*\]',
-    ]
-    for pattern in invalid_patterns:
-        text = re.sub(pattern, '', text)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-
-    # 2. 获取 blocks 并提取图片
+    # 1. 获取 blocks
     blocks = client.get_blocks(document_id)
+
+    # 2. 下载图片到 static 目录，并构建 token→URL 映射
     image_tokens = [b.get("image", {}).get("token") for b in blocks
                     if b.get("block_type") == 27 and b.get("image", {}).get("token")]
-
-    # 3. 下载图片到 static 目录
+    image_url_map = {}
     image_urls = []
     for token in image_tokens:
         try:
@@ -401,12 +387,20 @@ def fetch_document(app_id: str, app_secret: str, document_id: str,
             filename = os.path.basename(local_path)
             image_url = f"{base_url.rstrip('/')}/static/{filename}"
             image_urls.append(image_url)
+            image_url_map[token] = image_url
         except Exception as e:
             logger.error(f"下载图片失败 token={token}: {e}")
             image_urls.append({
                 "file_token": token,
                 "error": str(e),
             })
+
+    # 3. 用 blocks 生成 Markdown（会跳过删除线内容和失效 block）
+    text = _blocks_to_markdown(blocks, image_url_map=image_url_map)
+
+    # 3.1 清理多余空行
+    import re
+    text = re.sub(r'\n{3,}', '\n\n', text)
 
     return {
         "text": text,
