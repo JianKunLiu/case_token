@@ -19,6 +19,9 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 # ---------- Token 缓存（按 app_id 区分） ----------
 _token_cache = {}  # {(app_id, app_secret): {"token": ..., "expire_at": ...}}
 
+# ---------- 全局引用：供 _blocks_to_markdown 调用 sheet 读取 ----------
+_feishu_client_ref = None
+
 
 def _get_token(app_id: str, app_secret: str) -> str:
     """获取 tenant_access_token，带缓存自动刷新"""
@@ -98,6 +101,48 @@ class FeishuClient:
             page_token = data.get("data", {}).get("page_token")
 
         return all_blocks
+
+    def get_sheet_data(self, sheet_token: str) -> list:
+        """获取内嵌电子表格的数据，返回二维数组（首行为表头）
+
+        sheet_token 格式: {SpreadsheetToken}_{SheetID}
+        """
+        parts = sheet_token.split("_", 1)
+        if len(parts) < 2:
+            logger.warning(f"Sheet token 格式异常: {sheet_token}")
+            return []
+        spreadsheet_token, sheet_id = parts[0], parts[1]
+
+        url = f"{BASE_URL}/sheets/v2/spreadsheets/{spreadsheet_token}/values/{sheet_id}"
+        resp = requests.get(url, headers=self._headers(), timeout=30)
+        data = resp.json()
+        if data.get("code") != 0:
+            logger.warning(f"获取电子表格数据失败: {data}")
+            return []
+
+        values = data.get("data", {}).get("valueRange", {}).get("values", [])
+        # 过滤掉全为 None 的行，并将富文本单元格转为纯文本
+        result = []
+        for row in values:
+            if not any(v is not None and str(v).strip() for v in row):
+                continue
+            clean_row = []
+            for cell in row:
+                if cell is None:
+                    clean_row.append("")
+                elif isinstance(cell, list):
+                    # 富文本数组，提取 text 字段拼接
+                    text_parts = []
+                    for seg in cell:
+                        if isinstance(seg, dict):
+                            text_parts.append(seg.get("text", ""))
+                        else:
+                            text_parts.append(str(seg))
+                    clean_row.append("".join(text_parts))
+                else:
+                    clean_row.append(str(cell))
+            result.append(clean_row)
+        return result
 
     def download_image(self, file_token: str, save_dir: str = None) -> str:
         """下载飞书图片到本地，返回本地文件路径"""
@@ -380,9 +425,24 @@ def _blocks_to_markdown(blocks: list, parent_id: str = None,
             pass
 
         # ------- 新版电子表格 (block_type=30, sheet) -------
-        # sheet 是表格的包裹层，递归处理其子块
+        # sheet 是内嵌电子表格，通过 token 读取数据后渲染为 Markdown 表格
         elif btype == BLOCK_SHEET:
-            if children:
+            sheet_token = b.get("sheet", {}).get("token", "")
+            if sheet_token and _feishu_client_ref:
+                sheet_rows = _feishu_client_ref.get_sheet_data(sheet_token)
+                if sheet_rows:
+                    lines.append(_render_markdown_table(sheet_rows))
+                    lines.append("")
+                else:
+                    # 降级：如果获取失败，递归处理子块
+                    if children:
+                        child_md = _blocks_to_markdown(children, parent_id=bid,
+                                                       image_url_map=image_url_map,
+                                                       indent_level=indent_level,
+                                                       blocks_by_parent=blocks_by_parent)
+                        if child_md.strip():
+                            lines.append(child_md)
+            elif children:
                 child_md = _blocks_to_markdown(children, parent_id=bid,
                                                image_url_map=image_url_map,
                                                indent_level=indent_level,
@@ -514,7 +574,9 @@ def fetch_document(app_id: str, app_secret: str, document_id: str,
     入参: app_id, app_secret, document_id (均由外部传入)
     返回: {"text": "..."}
     """
+    global _feishu_client_ref
     client = FeishuClient(app_id, app_secret)
+    _feishu_client_ref = client  # 供 _blocks_to_markdown 中读取 sheet 数据
 
     # 1. 获取 blocks
     blocks = client.get_blocks(document_id)

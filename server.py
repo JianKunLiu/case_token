@@ -79,7 +79,7 @@ def serve_static(filename):
 # ==================== 启动 ====================
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5001))
+    port = int(os.environ.get("PORT", 5000))
     host = os.environ.get("HOST", "0.0.0.0")
     debug = os.environ.get("DEBUG", "true").lower() == "true"
 
