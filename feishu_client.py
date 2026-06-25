@@ -227,14 +227,21 @@ def _blocks_to_markdown(blocks: list, parent_id: str = None,
             logger.warning(f"跳过失效/未支持的 block: {bid}")
             continue
 
+        # 标记：当前 block 的文本内容是否全为删除线（应跳过自身及子 block）
+        skip_self_and_children = False
+
         # ------- 标题 -------
         if btype in HEADING_LEVELS:
             level = HEADING_LEVELS[btype]
-            text = _extract_text(b.get("text", {}).get("elements", []), image_url_map) or b.get("heading{}".format(level), {}).get("elements", [])
+            text = _extract_text(b.get("text", {}).get("elements", []), image_url_map)
             if not text:
                 text = _extract_text(b.get("heading{}".format(level), {}).get("elements", []), image_url_map)
-            lines.append(f"{'#' * level} {text}".strip())
-            lines.append("")
+            # 标题内容全被删除线划掉 → 跳过此标题及其所有子 block
+            if not text.strip():
+                skip_self_and_children = True
+            else:
+                lines.append(f"{'#' * level} {text}".strip())
+                lines.append("")
 
         # ------- 普通段落 -------
         elif btype == BLOCK_TEXT:
@@ -242,18 +249,26 @@ def _blocks_to_markdown(blocks: list, parent_id: str = None,
             if text.strip():
                 lines.append(text)
                 lines.append("")
+            else:
+                skip_self_and_children = True
 
         # ------- 无序列表 -------
         elif btype == BLOCK_BULLET:
             text = _extract_text(b.get("text", {}).get("elements", []), image_url_map)
-            prefix = "  " * indent_level + "- "
-            lines.append(f"{prefix}{text}")
+            if text.strip():
+                prefix = "  " * indent_level + "- "
+                lines.append(f"{prefix}{text}")
+            else:
+                skip_self_and_children = True
 
         # ------- 有序列表 -------
         elif btype == BLOCK_ORDERED:
             text = _extract_text(b.get("text", {}).get("elements", []), image_url_map)
-            prefix = "  " * indent_level + "1. "
-            lines.append(f"{prefix}{text}")
+            if text.strip():
+                prefix = "  " * indent_level + "1. "
+                lines.append(f"{prefix}{text}")
+            else:
+                skip_self_and_children = True
 
         # ------- 代码块 -------
         elif btype == BLOCK_CODE:
@@ -267,9 +282,12 @@ def _blocks_to_markdown(blocks: list, parent_id: str = None,
         # ------- 引用 -------
         elif btype == BLOCK_QUOTE:
             text = _extract_text(b.get("text", {}).get("elements", []), image_url_map)
-            for line in text.split("\n"):
-                lines.append(f"> {line}")
-            lines.append("")
+            if text.strip():
+                for line in text.split("\n"):
+                    lines.append(f"> {line}")
+                lines.append("")
+            else:
+                skip_self_and_children = True
 
         # ------- 分割线 -------
         elif btype == BLOCK_DIVIDER:
@@ -302,7 +320,7 @@ def _blocks_to_markdown(blocks: list, parent_id: str = None,
 
         # ------- 嵌套子块（列表项的子项等） -------
         if children and btype not in (BLOCK_PAGE, BLOCK_GRID, BLOCK_GRID_COLUMN,
-                                       BLOCK_TABLE, BLOCK_CALLOUT):
+                                       BLOCK_TABLE, BLOCK_CALLOUT) and not skip_self_and_children:
             child_md = _blocks_to_markdown(children, parent_id=bid,
                                            image_url_map=image_url_map,
                                            indent_level=indent_level + 1)
