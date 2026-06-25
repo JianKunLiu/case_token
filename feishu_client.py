@@ -159,6 +159,7 @@ BLOCK_GRID = 21
 BLOCK_GRID_COLUMN = 22
 BLOCK_IMAGE = 27
 BLOCK_TASK = 31
+BLOCK_UNDEFINED = 999  # 未支持/已失效的 block 类型
 
 HEADING_LEVELS = {
     BLOCK_HEADING_1: 1, BLOCK_HEADING_2: 2, BLOCK_HEADING_3: 3,
@@ -180,9 +181,9 @@ def _extract_text(elements: list, image_url_map: dict = None) -> str:
             # 斜体
             if style.get("italic"):
                 content = f"*{content}*"
-            # 删除线
+            # 删除线：内容已被划掉，视为无效，跳过不输出
             if style.get("strikethrough"):
-                content = f"~~{content}~~"
+                continue
             # 行内代码
             if style.get("inline_code"):
                 content = f"`{content}`"
@@ -220,6 +221,11 @@ def _blocks_to_markdown(blocks: list, parent_id: str = None,
         btype = b.get("block_type", 0)
         bid = b.get("block_id", "")
         children = blocks_by_parent.get(bid, [])
+
+        # ------- 未支持/已失效的 block，跳过自身及所有子 block -------
+        if btype == BLOCK_UNDEFINED:
+            logger.warning(f"跳过失效/未支持的 block: {bid}")
+            continue
 
         # ------- 标题 -------
         if btype in HEADING_LEVELS:
@@ -369,6 +375,18 @@ def fetch_document(app_id: str, app_secret: str, document_id: str,
 
     # 1. 获取纯文本
     text = client.get_raw_content(document_id)
+
+    # 1.1 清理 raw_content 中可能存在的失效引用占位文本，并清理多余空行
+    import re
+    invalid_patterns = [
+        r'\[引用内容[^\]]*失效[^\]]*\]',
+        r'\[引用内容[^\]]*不可用[^\]]*\]',
+        r'\[引用[^\]]*已失效[^\]]*\]',
+        r'\[内容[^\]]*不可用[^\]]*\]',
+    ]
+    for pattern in invalid_patterns:
+        text = re.sub(pattern, '', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
 
     # 2. 获取 blocks 并提取图片
     blocks = client.get_blocks(document_id)
