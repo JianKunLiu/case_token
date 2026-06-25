@@ -158,7 +158,10 @@ BLOCK_TABLE_CELL = 19
 BLOCK_GRID = 21
 BLOCK_GRID_COLUMN = 22
 BLOCK_IMAGE = 27
-BLOCK_TASK = 31
+BLOCK_SHEET = 30          # 新版电子表格容器
+BLOCK_TABLE_CONTAINER = 31  # 新版表格容器
+BLOCK_TABLE_CELL_V2 = 32    # 新版表格单元格
+BLOCK_TASK = 31  # 注意：与 TABLE_CONTAINER 共用 31，需按上下文区分
 BLOCK_UNDEFINED = 999  # 未支持/已失效的 block 类型
 
 HEADING_LEVELS = {
@@ -166,6 +169,42 @@ HEADING_LEVELS = {
     BLOCK_HEADING_4: 4, BLOCK_HEADING_5: 5, BLOCK_HEADING_6: 6,
     BLOCK_HEADING_7: 7, BLOCK_HEADING_8: 8, BLOCK_HEADING_9: 9,
 }
+
+
+# 字段名映射：block_type → 存储文本元素的字段名（新版飞书 API 使用命名字段而非 text 字段）
+_TEXT_FIELD_MAP = {
+    3: "heading1", 4: "heading2", 5: "heading3",
+    7: "heading4", 8: "heading6", 9: "heading7",
+    10: "heading8", 11: "heading9",
+    12: "bullet",    # 无序列表
+    13: "ordered",   # 有序列表
+    14: "code",      # 代码块
+    15: "quote",     # 引用块
+}
+# 标题类型也需要尝试 heading 字段（优先级高于 text）
+_HEADING_TYPES = {3, 4, 5, 7, 8, 9, 10, 11}
+
+
+def _get_block_elements(block: dict) -> list:
+    """从 block 中获取文本元素列表，优先使用命名字段（新版 API），fallback 到 text 字段"""
+    btype = block.get("block_type", 0)
+
+    # 标题类型：先尝试 headingN 字段
+    if btype in _HEADING_TYPES:
+        field_name = _TEXT_FIELD_MAP.get(btype, "text")
+        elements = block.get(field_name, {}).get("elements", [])
+        if elements:
+            return elements
+
+    # 其他类型：按映射表查找
+    field_name = _TEXT_FIELD_MAP.get(btype)
+    if field_name:
+        elements = block.get(field_name, {}).get("elements", [])
+        if elements:
+            return elements
+
+    # fallback: text 字段
+    return block.get("text", {}).get("elements", [])
 
 
 def _extract_text(elements: list, image_url_map: dict = None) -> str:
@@ -205,17 +244,26 @@ def _extract_text(elements: list, image_url_map: dict = None) -> str:
 
 
 def _blocks_to_markdown(blocks: list, parent_id: str = None,
-                        image_url_map: dict = None, indent_level: int = 0) -> str:
-    """递归将 block 列表转为 Markdown"""
+                        image_url_map: dict = None, indent_level: int = 0,
+                        blocks_by_parent: dict = None) -> str:
+    """递归将 block 列表转为 Markdown
+
+    blocks: 当前层级需要处理的 blocks 列表
+    blocks_by_parent: 全局的 parent_id → children 映射（用于任意深度的子 block 查找）
+    """
+    if blocks_by_parent is None:
+        blocks_by_parent = {}
+        for b in blocks:
+            pid = b.get("parent_id", "")
+            blocks_by_parent.setdefault(pid, []).append(b)
+
     lines = []
-    blocks_by_parent = {}
     ordered_blocks = []
 
     for b in blocks:
         pid = b.get("parent_id", "")
         if pid == parent_id:
             ordered_blocks.append(b)
-        blocks_by_parent.setdefault(pid, []).append(b)
 
     for b in ordered_blocks:
         btype = b.get("block_type", 0)
@@ -233,9 +281,7 @@ def _blocks_to_markdown(blocks: list, parent_id: str = None,
         # ------- 标题 -------
         if btype in HEADING_LEVELS:
             level = HEADING_LEVELS[btype]
-            text = _extract_text(b.get("text", {}).get("elements", []), image_url_map)
-            if not text:
-                text = _extract_text(b.get("heading{}".format(level), {}).get("elements", []), image_url_map)
+            text = _extract_text(_get_block_elements(b), image_url_map)
             # 标题内容全被删除线划掉 → 跳过此标题及其所有子 block
             if not text.strip():
                 skip_self_and_children = True
@@ -245,7 +291,7 @@ def _blocks_to_markdown(blocks: list, parent_id: str = None,
 
         # ------- 普通段落 -------
         elif btype == BLOCK_TEXT:
-            text = _extract_text(b.get("text", {}).get("elements", []), image_url_map)
+            text = _extract_text(_get_block_elements(b), image_url_map)
             if text.strip():
                 lines.append(text)
                 lines.append("")
@@ -254,7 +300,7 @@ def _blocks_to_markdown(blocks: list, parent_id: str = None,
 
         # ------- 无序列表 -------
         elif btype == BLOCK_BULLET:
-            text = _extract_text(b.get("text", {}).get("elements", []), image_url_map)
+            text = _extract_text(_get_block_elements(b), image_url_map)
             if text.strip():
                 prefix = "  " * indent_level + "- "
                 lines.append(f"{prefix}{text}")
@@ -263,7 +309,7 @@ def _blocks_to_markdown(blocks: list, parent_id: str = None,
 
         # ------- 有序列表 -------
         elif btype == BLOCK_ORDERED:
-            text = _extract_text(b.get("text", {}).get("elements", []), image_url_map)
+            text = _extract_text(_get_block_elements(b), image_url_map)
             if text.strip():
                 prefix = "  " * indent_level + "1. "
                 lines.append(f"{prefix}{text}")
@@ -281,7 +327,7 @@ def _blocks_to_markdown(blocks: list, parent_id: str = None,
 
         # ------- 引用 -------
         elif btype == BLOCK_QUOTE:
-            text = _extract_text(b.get("text", {}).get("elements", []), image_url_map)
+            text = _extract_text(_get_block_elements(b), image_url_map)
             if text.strip():
                 for line in text.split("\n"):
                     lines.append(f"> {line}")
@@ -302,28 +348,66 @@ def _blocks_to_markdown(blocks: list, parent_id: str = None,
                 lines.append(f"![]({url})")
                 lines.append("")
 
-        # ------- 表格 -------
+        # ------- 旧版表格 (block_type=18) -------
         elif btype == BLOCK_TABLE:
             rows = _extract_table_rows(b, blocks_by_parent)
             if rows:
                 lines.append(_render_markdown_table(rows))
                 lines.append("")
+            else:
+                # 降级：将表格所有子块的文本直接输出
+                table_id = b.get("block_id", "")
+                table_children = blocks_by_parent.get(table_id, [])
+                child_texts = []
+                for cb in table_children:
+                    t = _extract_text(_get_block_elements(cb), image_url_map)
+                    if t.strip():
+                        child_texts.append(t)
+                if child_texts:
+                    lines.append("\n".join(child_texts))
+                    lines.append("")
+
+        # ------- 新版表格 (block_type=31, table 容器) -------
+        elif btype == BLOCK_TABLE_CONTAINER:
+            rows = _extract_table_rows_v2(b, blocks, image_url_map)
+            if rows:
+                lines.append(_render_markdown_table(rows))
+                lines.append("")
+
+        # ------- 新版表格单元格 (block_type=32) -------
+        # 单元格由 TABLE_CONTAINER 处理，这里跳过（不产生输出）
+        elif btype == BLOCK_TABLE_CELL_V2:
+            pass
+
+        # ------- 新版电子表格 (block_type=30, sheet) -------
+        # sheet 是表格的包裹层，递归处理其子块
+        elif btype == BLOCK_SHEET:
+            if children:
+                child_md = _blocks_to_markdown(children, parent_id=bid,
+                                               image_url_map=image_url_map,
+                                               indent_level=indent_level,
+                                               blocks_by_parent=blocks_by_parent)
+                if child_md.strip():
+                    lines.append(child_md)
 
         # ------- 容器类递归处理子块 -------
         elif btype in (BLOCK_PAGE, BLOCK_GRID, BLOCK_GRID_COLUMN, BLOCK_CALLOUT):
             if children:
                 child_md = _blocks_to_markdown(children, parent_id=bid,
                                                image_url_map=image_url_map,
-                                               indent_level=indent_level)
+                                               indent_level=indent_level,
+                                               blocks_by_parent=blocks_by_parent)
                 if child_md.strip():
                     lines.append(child_md)
 
         # ------- 嵌套子块（列表项的子项等） -------
         if children and btype not in (BLOCK_PAGE, BLOCK_GRID, BLOCK_GRID_COLUMN,
-                                       BLOCK_TABLE, BLOCK_CALLOUT) and not skip_self_and_children:
+                                       BLOCK_TABLE, BLOCK_TABLE_CONTAINER, BLOCK_TABLE_CELL_V2,
+                                       BLOCK_SHEET, BLOCK_CALLOUT) and not skip_self_and_children:
             child_md = _blocks_to_markdown(children, parent_id=bid,
                                            image_url_map=image_url_map,
-                                           indent_level=indent_level + 1)
+                                           indent_level=indent_level + 1,
+                                           blocks_by_parent=blocks_by_parent)
             if child_md.strip():
                 lines.append(child_md)
 
@@ -334,23 +418,64 @@ def _extract_table_rows(table_block: dict, blocks_by_parent: dict) -> list:
     """从表格 block 提取行数据"""
     table_id = table_block.get("block_id", "")
     rows = []
-    row_blocks = [b for b in blocks_by_parent.get(table_id, [])
+    all_children = blocks_by_parent.get(table_id, [])
+    row_blocks = [b for b in all_children
                   if b.get("block_type") == BLOCK_TABLE_CELL]
+
+    logger.info(f"Table {table_id}: total_children={len(all_children)}, cell_blocks={len(row_blocks)}")
+    for b in all_children:
+        logger.info(f"  child type={b.get('block_type')} id={b.get('block_id')[:16]}... keys={list(b.keys())[:6]}")
 
     # 按 table 的 row/col 属性组织单元格
     # 简化处理：取所有直接子块中的文本
     cells_text = []
     for cell in row_blocks:
-        text = _extract_text(cell.get("text", {}).get("elements", []))
+        text = _extract_text(_get_block_elements(cell))
         cells_text.append(text)
 
     # 尝试按表格行列重组
-    row_size = table_block.get("table", {}).get("property", {}).get("column_size", len(cells_text))
-    if row_size > 0:
+    table_prop = table_block.get("table", {})
+    row_size = table_prop.get("property", {}).get("column_size", 0)
+    if not row_size:
+        # 某些版本可能在 table.row_size
+        row_size = table_prop.get("row_size", 0)
+    if not row_size:
+        row_size = len(cells_text)
+    if row_size > 0 and cells_text:
         for i in range(0, len(cells_text), row_size):
             rows.append(cells_text[i:i + row_size])
-    elif cells_text:
-        rows = [cells_text]
+
+    return rows
+
+
+def _extract_table_rows_v2(table_block: dict, all_blocks: list, image_url_map: dict = None) -> list:
+    """从新版表格 block (type=31) 提取行数据，按 cells 顺序 + column_size 重组"""
+    table_info = table_block.get("table", {})
+    column_size = table_info.get("property", {}).get("column_size", 1)
+    cell_ids = table_info.get("cells", [])
+    if not cell_ids:
+        return []
+
+    # 建立 block_id → block 的索引
+    block_map = {b.get("block_id"): b for b in all_blocks}
+
+    # 按 cells 顺序提取每个单元格的文本
+    cell_texts = []
+    for cell_id in cell_ids:
+        cell_block = block_map.get(cell_id, {})
+        # 单元格 (type=32) 的内容在 children 引用的子 block 里
+        text_parts = []
+        for child_id in cell_block.get("children", []):
+            child = block_map.get(child_id, {})
+            t = _extract_text(_get_block_elements(child), image_url_map)
+            if t.strip():
+                text_parts.append(t)
+        cell_texts.append(" ".join(text_parts))
+
+    # 按列数拆分成行
+    rows = []
+    for i in range(0, len(cell_texts), column_size):
+        rows.append(cell_texts[i:i + column_size])
 
     return rows
 
@@ -385,33 +510,27 @@ def blocks_to_markdown(blocks: list, image_url_map: dict = None) -> str:
 def fetch_document(app_id: str, app_secret: str, document_id: str,
                    base_url: str = "http://localhost:5000") -> dict:
     """
-    一站式：获取文档文字 + 图片，返回结构化 JSON
+    一站式：获取文档文字（含图片 Markdown 引用），返回结构化 JSON
     入参: app_id, app_secret, document_id (均由外部传入)
-    返回: {"text": "纯文本", "images": ["http://...", ...]}
+    返回: {"text": "..."}
     """
     client = FeishuClient(app_id, app_secret)
 
     # 1. 获取 blocks
     blocks = client.get_blocks(document_id)
 
-    # 2. 下载图片到 static 目录，并构建 token→URL 映射
+    # 2. 下载图片到 static 目录，并构建 token→URL 映射（用于 Markdown 内 ![]() 引用）
     image_tokens = [b.get("image", {}).get("token") for b in blocks
                     if b.get("block_type") == 27 and b.get("image", {}).get("token")]
     image_url_map = {}
-    image_urls = []
     for token in image_tokens:
         try:
             local_path = client.download_image(token)
             filename = os.path.basename(local_path)
             image_url = f"{base_url.rstrip('/')}/static/{filename}"
-            image_urls.append(image_url)
             image_url_map[token] = image_url
         except Exception as e:
             logger.error(f"下载图片失败 token={token}: {e}")
-            image_urls.append({
-                "file_token": token,
-                "error": str(e),
-            })
 
     # 3. 用 blocks 生成 Markdown（会跳过删除线内容和失效 block）
     # document_id 即为根 PAGE block 的 ID，子块的 parent_id 指向它
@@ -423,5 +542,4 @@ def fetch_document(app_id: str, app_secret: str, document_id: str,
 
     return {
         "text": text,
-        "images": image_urls,
     }
